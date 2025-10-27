@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""
+Russian Snake (Змейка) — Pygame
+Features:
+- Grid-based snake that grows by eating food ("points").
+- Each time you eat: the snake LENGTH increases, its THICKNESS grows a bit,
+  and its COLOR cycles through a rainbow.
+- Russian UI text (toggleable), simple HUD for score.
+- Smooth controls with arrow keys or WASD.
+- Simple restart (R) and pause (P).
+
+Controls:
+  ↑ ↓ ← →  or  W S A D : Move
+  P : Pause / Resume
+  R : Restart after game over
+  ESC / Q : Quit
+
+Requirements:
+  pip install pygame
+
+Run:
+  python snake_russian.py
+"""
+import sys
+import random
+import math
+from collections import deque
+
+try:
+    import pygame
+except ImportError:
+    print("This game requires pygame. Install with:  pip install pygame")
+    sys.exit(1)
+
+try:
+    # colorsys is part of the Python stdlib
+    import colorsys
+except Exception as e:
+    print("colorsys import failed:", e)
+    sys.exit(1)
+
+
+# ---------------------------- Config ----------------------------
+WIDTH, HEIGHT = 720, 520         # Window size (keep multiples of CELL for clean grid)
+CELL = 20                        # Grid cell size (movement step)
+GRID_W = WIDTH // CELL
+GRID_H = HEIGHT // CELL
+
+FPS_BASE = 12                    # Base speed (frames/second)
+SPEEDUP_EVERY = 6                # Slightly increase speed every N foods
+THICKNESS_MIN = max(8, CELL // 2 - 2)  # Minimum render thickness
+THICKNESS_MAX = CELL - 2         # Max thickness cap so we stay inside the cell
+THICKNESS_GROW = 1               # How much thickness grows per food
+
+FOOD_COLOR = (230, 80, 80)
+BG_COLOR = (18, 20, 24)
+GRID_COLOR = (30, 34, 40)
+HUD_COLOR = (220, 220, 220)
+BORDER_COLOR = (60, 66, 76)
+
+RUSSIAN_UI = True                # Show Russian strings (set False for English)
+
+
+# ---------------------------- Helpers ----------------------------
+def hsv_to_rgb_255(h, s, v):
+    """Convert HSV [0..1] to RGB 0..255 tuple."""
+    r, g, b = colorsys.hsv_to_rgb(h % 1.0, max(0, min(1, s)), max(0, min(1, v)))
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def rand_empty_cell(occupied):
+    """Return a random (x, y) cell not in 'occupied' set."""
+    while True:
+        x = random.randrange(0, GRID_W)
+        y = random.randrange(0, GRID_H)
+        if (x, y) not in occupied:
+            return (x, y)
+
+
+# ---------------------------- Game Objects ----------------------------
+class Snake:
+    def __init__(self):
+        cx, cy = GRID_W // 2, GRID_H // 2
+        self.body = deque([(cx, cy), (cx - 1, cy), (cx - 2, cy)])  # head is leftmost element
+        self.dir = (1, 0)   # moving right initially
+        self.pending_growth = 0
+        self.alive = True
+
+        # Visuals
+        self.hue = 0.04     # base hue for color cycling
+        self.thickness = THICKNESS_MIN
+
+    @property
+    def head(self):
+        return self.body[0]
+
+    def set_direction(self, new_dir):
+        """Prevent reversing directly into yourself."""
+        if len(self.body) <= 1:
+            self.dir = new_dir
+            return
+        curx, cury = self.dir
+        nx, ny = new_dir
+        if (curx == -nx and cury == -ny):
+            return  # ignore reverse
+        self.dir = new_dir
+
+    def step(self):
+        """Move one step; return False if we died (collision)."""
+        if not self.alive:
+            return False
+
+        hx, hy = self.head
+        dx, dy = self.dir
+        nx, ny = hx + dx, hy + dy
+
+        # Wall collision
+        if nx < 0 or nx >= GRID_W or ny < 0 or ny >= GRID_H:
+            self.alive = False
+            return False
+
+        # Self collision (check against body except the last tail cell that's about to move)
+        next_head = (nx, ny)
+        if self.pending_growth == 0:
+            tail = self.body.pop()
+        else:
+            tail = None
+            self.pending_growth -= 1
+
+        if next_head in self.body:
+            self.alive = False
+            return False
+
+        # Add new head
+        self.body.appendleft(next_head)
+        return True
+
+    def eat(self, growth=1):
+        """Trigger on eating food: queue growth, thicken, and shift hue."""
+        self.pending_growth += max(1, int(growth))
+        self.thickness = min(THICKNESS_MAX, self.thickness + THICKNESS_GROW)
+        # cycle hue a bit on each eat
+        self.hue = (self.hue + 0.12) % 1.0
+
+    def occupies(self):
+        return set(self.body)
+
+    def draw(self, surf):
+        """Draw snake with a rainbow gradient from tail to head and thickness rendering."""
+        # We'll shade by index so the head stands out slightly brighter.
+        n = len(self.body)
+        # Slight gradient delta along the body:
+        grad = 0.6 / max(1, n - 1)
+        # Draw tail to head so head is on top visually
+        for i, (x, y) in enumerate(reversed(self.body)):
+            # i goes tail..head; convert to 0..1 with head brightest
+            t = i / max(1, n - 1) if n > 1 else 1.0
+            hue = (self.hue + t * 0.35) % 1.0
+            sat = 0.85
+            val = 0.75 + 0.25 * (1 - t)  # head brighter
+            color = hsv_to_rgb_255(hue, sat, val)
+
+            px = x * CELL
+            py = y * CELL
+
+            # Center a square of size 'thickness' inside the cell
+            size = self.thickness
+            offset = (CELL - size) // 2
+            rect = pygame.Rect(px + offset, py + offset, size, size)
+
+            # Rounded corners look nicer
+            pygame.draw.rect(surf, color, rect, border_radius=max(4, size // 4))
+
+        # Optional: draw a small eye on the head for character
+        hx, hy = self.head
+        px = hx * CELL
+        py = hy * CELL
+        size = max(4, self.thickness // 3)
+        eye_offset = (CELL - size) // 2
+        eye_rect = pygame.Rect(px + eye_offset, py + eye_offset, size, size)
+        pygame.draw.rect(surf, (245, 245, 245), eye_rect, border_radius=size // 2)
+
+
+class Food:
+    def __init__(self, occupied):
+        self.pos = rand_empty_cell(occupied)
+
+    def relocate(self, occupied):
+        self.pos = rand_empty_cell(occupied)
+
+    def draw(self, surf):
+        x, y = self.pos
+        px = x * CELL
+        py = y * CELL
+        r = CELL // 2 - 2
+        center = (px + CELL // 2, py + CELL // 2)
+        pygame.draw.circle(surf, FOOD_COLOR, center, r)
+
+
+# ---------------------------- Game ----------------------------
+class Game:
+    def __init__(self):
+        pygame.init()
+        pygame.display.set_caption("Змейка — Russian Snake" if RUSSIAN_UI else "Snake")
+
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        self.clock = pygame.time.Clock()
+
+        # Fonts
+        self.font = pygame.font.SysFont("consolas,dejavusansmono,menlo,monaco", 20, bold=False)
+        self.bigfont = pygame.font.SysFont("consolas,dejavusansmono,menlo,monaco", 36, bold=True)
+
+        self.reset()
+
+    def reset(self):
+        self.snake = Snake()
+        self.food = Food(self.snake.occupies())
+        self.score = 0
+        self.foods_eaten = 0
+        self.paused = False
+        self.game_over = False
+
+    def handle_input(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit(0)
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                    pygame.quit()
+                    sys.exit(0)
+                elif event.key in (pygame.K_p,):
+                    self.paused = not self.paused
+                elif event.key in (pygame.K_r,):
+                    if self.game_over:
+                        self.reset()
+                elif event.key in (pygame.K_UP, pygame.K_w):
+                    self.snake.set_direction((0, -1))
+                elif event.key in (pygame.K_DOWN, pygame.K_s):
+                    self.snake.set_direction((0, 1))
+                elif event.key in (pygame.K_LEFT, pygame.K_a):
+                    self.snake.set_direction((-1, 0))
+                elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                    self.snake.set_direction((1, 0))
+
+    def update(self):
+        if self.paused or self.game_over:
+            return
+
+        alive = self.snake.step()
+        if not alive:
+            self.game_over = True
+            return
+
+        # Eat food?
+        if self.snake.head == self.food.pos:
+            self.score += 1
+            self.foods_eaten += 1
+            self.snake.eat(growth=1)
+            self.food.relocate(self.snake.occupies())
+
+    def current_fps(self):
+        """Speed grows slightly with score, capped to keep it playable."""
+        speed_bonus = self.foods_eaten // SPEEDUP_EVERY
+        return min(24, FPS_BASE + speed_bonus)
+
+    def draw_grid(self):
+        for x in range(0, WIDTH, CELL):
+            pygame.draw.line(self.screen, GRID_COLOR, (x, 0), (x, HEIGHT))
+        for y in range(0, HEIGHT, CELL):
+            pygame.draw.line(self.screen, GRID_COLOR, (0, y), (WIDTH, y))
+
+    def draw_hud(self):
+        if RUSSIAN_UI:
+            score_label = f"Очки: {self.score}"
+            status_label = "Пауза" if self.paused else ""
+        else:
+            score_label = f"Score: {self.score}"
+            status_label = "Paused" if self.paused else ""
+
+        surf = self.font.render(score_label, True, HUD_COLOR)
+        self.screen.blit(surf, (10, 8))
+
+        if status_label:
+            psurf = self.font.render(status_label, True, (200, 200, 200))
+            self.screen.blit(psurf, (WIDTH - psurf.get_width() - 10, 8))
+
+        # Border frame
+        pygame.draw.rect(self.screen, BORDER_COLOR, (0, 0, WIDTH, HEIGHT), 2, border_radius=8)
+
+    def draw_game_over(self):
+        if RUSSIAN_UI:
+            title = "Игра окончена"
+            hint = "Нажмите R, чтобы начать заново"
+        else:
+            title = "Game Over"
+            hint = "Press R to restart"
+
+        t_surf = self.bigfont.render(title, True, (240, 240, 240))
+        h_surf = self.font.render(hint, True, (200, 200, 200))
+
+        self.screen.blit(t_surf, ((WIDTH - t_surf.get_width()) // 2, HEIGHT // 2 - 36))
+        self.screen.blit(h_surf, ((WIDTH - h_surf.get_width()) // 2, HEIGHT // 2 + 8))
+
+    def render(self):
+        self.screen.fill(BG_COLOR)
+        self.draw_grid()
+        self.food.draw(self.screen)
+        self.snake.draw(self.screen)
+        self.draw_hud()
+        if self.game_over:
+            self.draw_game_over()
+        pygame.display.flip()
+
+    def run(self):
+        while True:
+            self.handle_input()
+            self.update()
+            self.render()
+            self.clock.tick(self.current_fps())
+
+
+if __name__ == "__main__":
+    Game().run()
